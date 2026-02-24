@@ -59,12 +59,17 @@ CATALOGO_PHOTOSI = {
     "XL (30x30)": 79.90
 }
 
-# --- 5. INTERFACCIA E TARGET ---
-st.title("🚀 PhotoSì Intelligence: Monitor Premium")
-st.markdown("Piattaforma di tracciamento prezzi competitor per fotolibri Premium (Rigidi/Layflat).")
-
-if 'targets' not in st.session_state:
-    st.session_state.targets = [
+# --- FUNZIONE PER CARICARE I TARGET DAL DATABASE ---
+def load_targets_from_db():
+    try:
+        response = supabase.table("target_competitor").select("*").execute()
+        if response.data:
+            return [{"paese": d["paese"], "competitor": d["competitor"], "url": d["url"]} for d in response.data]
+    except Exception as e:
+        pass
+    
+    # Se il DB è vuoto o c'è un errore, restituisce quelli di default
+    return [
         {"paese": "GB", "competitor": "Photobox", "url": "https://www.photobox.co.uk/photo-books"},
         {"paese": "IT", "competitor": "Cewe IT", "url": "https://www.cewe.it/fotolibro-cewe.html"},
         {"paese": "IT", "competitor": "Saal Digital", "url": "https://www.saal-digital.it/fotolibro/"},
@@ -72,8 +77,40 @@ if 'targets' not in st.session_state:
         {"paese": "IT", "competitor": "Popsa", "url": "https://popsa.com/it-it/prodotti/fotolibri"}
     ]
 
-with st.expander("🌍 Gestione Target Competitor", expanded=False):
-    df_targets = st.data_editor(pd.DataFrame(st.session_state.targets), num_rows="dynamic")
+# --- 5. INTERFACCIA E TARGET ---
+st.title("🚀 PhotoSì Intelligence: Monitor Premium")
+st.markdown("Piattaforma di tracciamento prezzi competitor per fotolibri Premium (Rigidi/Layflat).")
+
+if 'targets' not in st.session_state:
+    st.session_state.targets = load_targets_from_db()
+
+with st.expander("🌍 Gestione Target Competitor (Salvati su Database)", expanded=False):
+    st.info("Aggiungi, modifica o cancella le righe qui sotto. Poi clicca su 'Salva Modifiche' per aggiornare il database per sempre.")
+    
+    # Tabella modificabile
+    df_targets_edit = st.data_editor(pd.DataFrame(st.session_state.targets), num_rows="dynamic", use_container_width=True)
+    
+    # Bottone di salvataggio
+    if st.button("💾 Salva Modifiche nel Database", type="secondary"):
+        # Convertiamo il dataframe modificato in lista di dizionari ignorando righe vuote
+        new_targets_list = df_targets_edit.to_dict(orient='records')
+        clean_targets = [{"paese": r["paese"], "competitor": r["competitor"], "url": r["url"]} 
+                         for r in new_targets_list if str(r.get("competitor")).strip() != "nan" and str(r.get("competitor")).strip() != ""]
+        
+        try:
+            # 1. Svuotiamo la tabella vecchia nel DB
+            supabase.table("target_competitor").delete().neq("id", 0).execute()
+            # 2. Inseriamo i nuovi target
+            if clean_targets:
+                supabase.table("target_competitor").insert(clean_targets).execute()
+            
+            st.session_state.targets = clean_targets
+            st.success("✅ Lista competitor aggiornata in modo permanente!")
+        except Exception as e:
+            st.error(f"Errore durante il salvataggio dei target: {e}")
+            
+    # Usiamo il dataframe modificato per la scansione corrente
+    df_targets = pd.DataFrame(st.session_state.targets)
 
 # --- 6. MOTORE DI SCRAPING (Anti-crash) ---
 async def fetch_site_text(url):
@@ -116,7 +153,6 @@ if st.button("🔥 ESEGUI NUOVA SCANSIONE", type="primary"):
             testo_grezzo = asyncio.run(fetch_site_text(row['url']))
             
             if testo_grezzo and "Errore caricamento" not in testo_grezzo:
-                # PROMPT BLINDATO PER EVITARE SBALZI DI PREZZO
                 prompt = f"""
                 Sei un pricing analyst inflessibile. Trova i prezzi dei fotolibri PREMIUM (carta fotografica).
                 REGOLE TASSATIVE:
@@ -129,7 +165,7 @@ if st.button("🔥 ESEGUI NUOVA SCANSIONE", type="primary"):
                 try:
                     res = client.chat.completions.create(
                         model="gpt-4o",
-                        temperature=0.0, # ZERO CREATIVITÀ, MASSIMA MATEMATICA
+                        temperature=0.0,
                         messages=[{"role": "user", "content": prompt + "\nTesto:\n" + testo_grezzo}],
                         response_format={"type": "json_object"}
                     )
@@ -145,7 +181,6 @@ if st.button("🔥 ESEGUI NUOVA SCANSIONE", type="primary"):
                             delta = round(p_eur - p_ref, 2)
                             status_text = "🟢 Conveniente" if delta < 0 else "🔴 Più Caro"
                             
-                            # Dati per la visualizzazione
                             scraped_data_temp.append({
                                 "Paese": row['paese'], "Competitor": row['competitor'], 
                                 "Categoria": d['match'], "Prodotto Loro": d.get('nome_loro', 'N/D'),
@@ -153,7 +188,6 @@ if st.button("🔥 ESEGUI NUOVA SCANSIONE", type="primary"):
                                 "Delta (€)": delta, "Status": status_text
                             })
                             
-                            # Dati per Supabase
                             db_records.append({
                                 "paese": row['paese'], "competitor": row['competitor'],
                                 "categoria": d['match'], "prodotto_loro": d.get('nome_loro', 'N/D'),
@@ -170,7 +204,6 @@ if st.button("🔥 ESEGUI NUOVA SCANSIONE", type="primary"):
     my_bar.empty()
     st.session_state.scraped_data = scraped_data_temp
     
-    # SALVATAGGIO SU SUPABASE
     if db_records:
         try:
             supabase.table("storico_prezzi").insert(db_records).execute()
@@ -183,12 +216,10 @@ st.divider()
 # --- 8. DASHBOARD A SCHEDE (TABS) ---
 tab1, tab2, tab3 = st.tabs(["📊 Ultima Scansione", "📈 Analisi di Mercato", "🕰️ Storico & Trend"])
 
-# --- TAB 1: ULTIMA SCANSIONE ---
 with tab1:
     if st.session_state.scraped_data:
         df_res = pd.DataFrame(st.session_state.scraped_data)
         
-        # KPI in alto
         col1, col2, col3, col4 = st.columns(4)
         minaccia = df_res.loc[df_res['Delta (€)'].idxmin()]
         competitor_piu_caro = df_res.loc[df_res['Delta (€)'].idxmax()]
@@ -206,13 +237,11 @@ with tab1:
     else:
         st.info("Esegui una scansione per popolare questa scheda.")
 
-# --- TAB 2: ANALISI DI MERCATO (GRAFICI PARLANTI) ---
 with tab2:
     if st.session_state.scraped_data:
         df_res = pd.DataFrame(st.session_state.scraped_data)
         
         st.write("### 🥊 Confronto Diretto dei Prezzi (PhotoSì vs Competitor)")
-        # Grafico a barre affiancate (molto leggibile)
         fig_bar = go.Figure()
         fig_bar.add_trace(go.Bar(x=df_res['Competitor'] + " - " + df_res['Categoria'], y=df_res['PhotoSì (€)'], name='PhotoSì', marker_color='#E50914'))
         fig_bar.add_trace(go.Bar(x=df_res['Competitor'] + " - " + df_res['Categoria'], y=df_res['Prezzo Loro (€)'], name='Competitor', marker_color='#1f77b4'))
@@ -220,12 +249,10 @@ with tab2:
         st.plotly_chart(fig_bar, use_container_width=True)
         
         st.write("### 🎯 Posizionamento sul Mercato (Scatter Plot)")
-        # Scatter plot per vedere la distribuzione
         fig_scatter = px.scatter(
             df_res, x="Competitor", y="Prezzo Loro (€)", color="Categoria", size="PhotoSì (€)",
             hover_data=["Prodotto Loro", "Delta (€)"], title="Dove si concentrano i prezzi per ogni categoria?"
         )
-        # Linee orizzontali per i prezzi PhotoSì (medie/riferimenti)
         for cat, price in CATALOGO_PHOTOSI.items():
             fig_scatter.add_hline(y=price, line_dash="dot", opacity=0.3, annotation_text=f"Tuo {cat}")
         fig_scatter.update_traces(marker=dict(line=dict(width=1, color='DarkSlateGrey')))
@@ -234,7 +261,6 @@ with tab2:
     else:
         st.info("Esegui una scansione per visualizzare le analisi di mercato.")
 
-# --- TAB 3: STORICO E TREND DAL DATABASE ---
 with tab3:
     try:
         response = supabase.table("storico_prezzi").select("*").order("data_scansione", desc=False).execute()
