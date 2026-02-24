@@ -8,18 +8,17 @@ from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
-# 1. SETUP INIZIALE STREAMLIT (Deve essere la prima riga)
+# 1. SETUP INIZIALE
 st.set_page_config(page_title="PhotoSì Intelligence Premium", layout="wide")
 
-# 2. INSTALLAZIONE FORZATA BROWSER (Eseguita 1 sola volta)
+# 2. INSTALLAZIONE BROWSER (Sicura per Streamlit Cloud)
 @st.cache_resource
 def install_browser():
     try:
-        # Scarica Chromium nel container di Streamlit
-        subprocess.run(["playwright", "install", "chromium"], check=True)
+        subprocess.run(["python", "-m", "playwright", "install", "chromium"], check=True)
     except Exception as e:
         st.error(f"Errore di installazione del browser: {e}")
-        
+
 install_browser()
 
 # 3. GESTIONE CHIAVE API
@@ -62,20 +61,34 @@ if 'targets' not in st.session_state:
 with st.expander("🌍 Gestione Target Competitor", expanded=True):
     df_targets = st.data_editor(pd.DataFrame(st.session_state.targets), num_rows="dynamic")
 
-# 6. MOTORE DI SCRAPING (Con parametri anti-crash per server)
+# 6. MOTORE DI SCRAPING (Anti-Crash per Streamlit)
 async def fetch_site_text(url):
     async with async_playwright() as p:
-        # Argomenti fondamentali per non far crashare Chromium su Streamlit Cloud
+        # Argomenti ESTREMI per non consumare RAM ed evitare il TargetClosedError
         browser = await p.chromium.launch(
-            headless=True, 
-            args=["--no-sandbox", "--disable-dev-shm-usage"]
+            headless=True,
+            args=[
+                "--no-sandbox",
+                "--disable-setuid-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--single-process",
+                "--no-zygote"
+            ]
         )
         context = await browser.new_context(user_agent="Mozilla/5.0")
         page = await context.new_page()
+        
+        # TRUCCO MAGICO: Blocca immagini, CSS e font. Carica solo l'HTML! (Risparmia il 90% della RAM)
+        await page.route("**/*", lambda route: route.abort() 
+                         if route.request.resource_type in ["image", "stylesheet", "media", "font"] 
+                         else route.continue_())
+
         try:
             await page.goto(url, timeout=60000, wait_until="domcontentloaded")
-            await asyncio.sleep(7)
-            await page.evaluate("window.scrollTo(0, document.body.scrollHeight/2)")
+            await asyncio.sleep(5)
+            # Scroll leggero
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight/3)")
             html = await page.content()
             soup = BeautifulSoup(html, 'html.parser')
             for s in soup(["script", "style", "nav", "footer", "header"]): s.extract()
@@ -102,7 +115,6 @@ if st.button("🔥 AVVIA MONITORAGGIO PREZZI"):
                 Restituisci solo un JSON in questo formato: 
                 {{"data": [{{"match": "...", "nome_loro": "...", "prezzo": 0.0, "valuta": "..."}}]}}
                 """
-                
                 try:
                     response = client.chat.completions.create(
                         model="gpt-4o",
