@@ -12,17 +12,16 @@ from openai import OpenAI
 # 1. SETUP INIZIALE
 st.set_page_config(page_title="PhotoSì Intelligence Premium", layout="wide")
 
-# 2. INSTALLAZIONE BROWSER (Infallibile con sys.executable)
+# 2. INSTALLAZIONE BROWSER (Senza richiedere permessi di root)
 @st.cache_resource
 def install_browser():
     try:
-        st.info("🔄 Installazione motore browser in corso... (richiede qualche secondo solo al primo avvio)")
-        # Usa l'eseguibile Python corretto del server Streamlit
+        st.info("🔄 Download del browser in corso... (richiede qualche secondo)")
+        # Scarichiamo SOLO il browser, SENZA install-deps (che fa crashare tutto per i permessi)
         subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
-        subprocess.run([sys.executable, "-m", "playwright", "install-deps", "chromium"], check=True)
         st.success("✅ Browser installato con successo!")
     except subprocess.CalledProcessError as e:
-        st.error(f"❌ Errore durante l'installazione del browser: {e}")
+        st.error(f"❌ Errore durante il download del browser: {e}")
 
 install_browser()
 
@@ -66,7 +65,7 @@ if 'targets' not in st.session_state:
 with st.expander("🌍 Gestione Target Competitor", expanded=True):
     df_targets = st.data_editor(pd.DataFrame(st.session_state.targets), num_rows="dynamic")
 
-# 6. MOTORE DI SCRAPING (Anti-Crash e Salva RAM per Streamlit)
+# 6. MOTORE DI SCRAPING
 async def fetch_site_text(url):
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -76,14 +75,13 @@ async def fetch_site_text(url):
                 "--disable-setuid-sandbox",
                 "--disable-dev-shm-usage",
                 "--disable-gpu",
-                "--single-process",
-                "--no-zygote"
+                "--single-process"
             ]
         )
         context = await browser.new_context(user_agent="Mozilla/5.0")
         page = await context.new_page()
         
-        # Blocca caricamento di immagini e CSS (Risparmia il 90% della RAM)
+        # Blocca immagini e CSS
         await page.route("**/*", lambda route: route.abort() 
                          if route.request.resource_type in ["image", "stylesheet", "media", "font"] 
                          else route.continue_())
