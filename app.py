@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import asyncio
 import os
+import sys
 import json
 import subprocess
 from playwright.async_api import async_playwright
@@ -11,13 +12,17 @@ from openai import OpenAI
 # 1. SETUP INIZIALE
 st.set_page_config(page_title="PhotoSì Intelligence Premium", layout="wide")
 
-# 2. INSTALLAZIONE BROWSER (Sicura per Streamlit Cloud)
+# 2. INSTALLAZIONE BROWSER (Infallibile con sys.executable)
 @st.cache_resource
 def install_browser():
     try:
-        subprocess.run(["python", "-m", "playwright", "install", "chromium"], check=True)
-    except Exception as e:
-        st.error(f"Errore di installazione del browser: {e}")
+        st.info("🔄 Installazione motore browser in corso... (richiede qualche secondo solo al primo avvio)")
+        # Usa l'eseguibile Python corretto del server Streamlit
+        subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], check=True)
+        subprocess.run([sys.executable, "-m", "playwright", "install-deps", "chromium"], check=True)
+        st.success("✅ Browser installato con successo!")
+    except subprocess.CalledProcessError as e:
+        st.error(f"❌ Errore durante l'installazione del browser: {e}")
 
 install_browser()
 
@@ -61,10 +66,9 @@ if 'targets' not in st.session_state:
 with st.expander("🌍 Gestione Target Competitor", expanded=True):
     df_targets = st.data_editor(pd.DataFrame(st.session_state.targets), num_rows="dynamic")
 
-# 6. MOTORE DI SCRAPING (Anti-Crash per Streamlit)
+# 6. MOTORE DI SCRAPING (Anti-Crash e Salva RAM per Streamlit)
 async def fetch_site_text(url):
     async with async_playwright() as p:
-        # Argomenti ESTREMI per non consumare RAM ed evitare il TargetClosedError
         browser = await p.chromium.launch(
             headless=True,
             args=[
@@ -79,7 +83,7 @@ async def fetch_site_text(url):
         context = await browser.new_context(user_agent="Mozilla/5.0")
         page = await context.new_page()
         
-        # TRUCCO MAGICO: Blocca immagini, CSS e font. Carica solo l'HTML! (Risparmia il 90% della RAM)
+        # Blocca caricamento di immagini e CSS (Risparmia il 90% della RAM)
         await page.route("**/*", lambda route: route.abort() 
                          if route.request.resource_type in ["image", "stylesheet", "media", "font"] 
                          else route.continue_())
@@ -87,7 +91,6 @@ async def fetch_site_text(url):
         try:
             await page.goto(url, timeout=60000, wait_until="domcontentloaded")
             await asyncio.sleep(5)
-            # Scroll leggero
             await page.evaluate("window.scrollTo(0, document.body.scrollHeight/3)")
             html = await page.content()
             soup = BeautifulSoup(html, 'html.parser')
