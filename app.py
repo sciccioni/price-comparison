@@ -3,26 +3,38 @@ import pandas as pd
 import asyncio
 import os
 import json
+import subprocess
 from playwright.async_api import async_playwright
 from bs4 import BeautifulSoup
 from openai import OpenAI
 
-# --- INSTALLAZIONE BROWSER AUTOMATICA ---
-# Questo comando scarica Chromium all'interno del server Streamlit
-if "playwright_install" not in st.session_state:
-    os.system("playwright install chromium")
-    st.session_state.playwright_install = True
-
-# --- CONFIGURAZIONE ---
+# 1. SETUP INIZIALE STREAMLIT (Deve essere la prima riga)
 st.set_page_config(page_title="PhotoSì Intelligence Premium", layout="wide")
 
-# Recupero API Key dai Secrets di Streamlit
+# 2. INSTALLAZIONE FORZATA BROWSER (Eseguita 1 sola volta)
+@st.cache_resource
+def install_browser():
+    try:
+        # Scarica Chromium nel container di Streamlit
+        subprocess.run(["playwright", "install", "chromium"], check=True)
+    except Exception as e:
+        st.error(f"Errore di installazione del browser: {e}")
+        
+install_browser()
+
+# 3. GESTIONE CHIAVE API
 if "OPENAI_API_KEY" in st.secrets:
     api_key = st.secrets["OPENAI_API_KEY"]
+elif os.environ.get("OPENAI_API_KEY"):
+    api_key = os.environ.get("OPENAI_API_KEY")
 else:
-    api_key = st.sidebar.text_input("OpenAI API Key", type="password")
+    api_key = st.sidebar.text_input("Inserisci OpenAI API Key manualmente", type="password")
 
-# Catalogo Premium PhotoSì
+if not api_key:
+    st.warning("⚠️ Inserisci la chiave API OpenAI per continuare.")
+    st.stop()
+
+# 4. CATALOGO PREMIUM
 CATALOGO_PHOTOSI = {
     "Racconti (20x20)": 44.90,
     "Eventi (27x20)": 49.90,
@@ -30,78 +42,102 @@ CATALOGO_PHOTOSI = {
     "XL (30x30)": 79.90
 }
 
-st.title("🚀 Monitor Competitor Premium")
+# 5. INTERFACCIA
+st.title("🚀 PhotoSì Intelligence: Monitor Premium")
 
 with st.sidebar:
-    st.header("⚙️ Cambi Valuta")
-    rate_gbp = st.number_input("1 GBP in EUR", value=1.18)
-    rate_usd = st.number_input("1 USD in EUR", value=0.94)
+    st.header("⚙️ Impostazioni")
+    rate_gbp = st.number_input("Tasso Cambio 1 GBP in EUR", value=1.18)
+    rate_usd = st.number_input("Tasso Cambio 1 USD in EUR", value=0.94)
 
-# Lista Mercati
 if 'targets' not in st.session_state:
     st.session_state.targets = [
         {"paese": "GB", "competitor": "Photobox", "url": "https://www.photobox.co.uk/photo-books"},
         {"paese": "IT", "competitor": "Cewe IT", "url": "https://www.cewe.it/fotolibro-cewe.html"},
         {"paese": "IT", "competitor": "Saal Digital", "url": "https://www.saal-digital.it/fotolibro/"},
-        {"paese": "IT", "competitor": "Cheerz", "url": "https://www.cheerz.com/it/categories/books"}
+        {"paese": "IT", "competitor": "Cheerz", "url": "https://www.cheerz.com/it/categories/books"},
+        {"paese": "IT", "competitor": "Popsa", "url": "https://popsa.com/it-it/prodotti/fotolibri"}
     ]
 
-df_targets = st.data_editor(pd.DataFrame(st.session_state.targets), num_rows="dynamic")
+with st.expander("🌍 Gestione Target Competitor", expanded=True):
+    df_targets = st.data_editor(pd.DataFrame(st.session_state.targets), num_rows="dynamic")
 
-# --- MOTORE DI SCRAPING ---
-async def fetch_text(url):
+# 6. MOTORE DI SCRAPING (Con parametri anti-crash per server)
+async def fetch_site_text(url):
     async with async_playwright() as p:
-        # Lancio chromium con parametri di sicurezza per i server
-        browser = await p.chromium.launch(headless=True, args=["--no-sandbox"])
-        page = await browser.new_page()
+        # Argomenti fondamentali per non far crashare Chromium su Streamlit Cloud
+        browser = await p.chromium.launch(
+            headless=True, 
+            args=["--no-sandbox", "--disable-dev-shm-usage"]
+        )
+        context = await browser.new_context(user_agent="Mozilla/5.0")
+        page = await context.new_page()
         try:
             await page.goto(url, timeout=60000, wait_until="domcontentloaded")
-            await asyncio.sleep(5)
+            await asyncio.sleep(7)
+            await page.evaluate("window.scrollTo(0, document.body.scrollHeight/2)")
             html = await page.content()
             soup = BeautifulSoup(html, 'html.parser')
-            for s in soup(["script", "style"]): s.extract()
-            return soup.get_text(separator=' | ', strip=True)[:10000]
+            for s in soup(["script", "style", "nav", "footer", "header"]): s.extract()
+            return soup.get_text(separator=' | ', strip=True)[:15000]
         except Exception as e:
-            return f"Errore: {e}"
+            return f"Errore caricamento: {str(e)}"
         finally:
             await browser.close()
 
-# --- LOGICA ---
-if st.button("🔥 AVVIA SCANSIONE"):
-    if not api_key:
-        st.error("Inserisci la API Key!")
-    else:
-        client = OpenAI(api_key=api_key)
-        all_data = []
-        
-        for _, row in df_targets.iterrows():
-            with st.status(f"Analizzando {row['competitor']}..."):
-                testo = asyncio.run(fetch_text(row['url']))
+# 7. LOGICA DI ESECUZIONE
+if st.button("🔥 AVVIA MONITORAGGIO PREZZI"):
+    client = OpenAI(api_key=api_key)
+    all_results = []
+    
+    for i, row in df_targets.iterrows():
+        with st.status(f"Analizzando {row['competitor']}..."):
+            testo_grezzo = asyncio.run(fetch_site_text(row['url']))
+            
+            if testo_grezzo and "Errore caricamento" not in testo_grezzo:
+                prompt = f"""
+                Analizza il testo del sito {row['competitor']}.
+                Trova i prezzi dei fotolibri PREMIUM (carta fotografica, layflat, ecc.).
+                Abbinali ESATTAMENTE a queste categorie: {list(CATALOGO_PHOTOSI.keys())}.
+                Restituisci solo un JSON in questo formato: 
+                {{"data": [{{"match": "...", "nome_loro": "...", "prezzo": 0.0, "valuta": "..."}}]}}
+                """
                 
-                if "Errore" not in testo:
-                    prompt = f"Estrai prezzi Premium per {list(CATALOGO_PHOTOSI.keys())}. Ritorna SOLO JSON: {{\"data\": [{{\"match\": \"...\", \"prezzo\": 0.0, \"valuta\": \"...\"}}]}}"
-                    res = client.chat.completions.create(
-                        model="gpt-4o", 
-                        messages=[{"role": "user", "content": testo}],
+                try:
+                    response = client.chat.completions.create(
+                        model="gpt-4o",
+                        messages=[{"role": "user", "content": prompt + "\n\nTesto:\n" + testo_grezzo}],
                         response_format={"type": "json_object"}
                     )
                     
-                    items = json.loads(res.choices[0].message.content).get('data', [])
-                    for i in items:
-                        val = i['valuta'].upper()
-                        r = rate_gbp if "GBP" in val or "£" in val else rate_usd if "USD" in val or "$" in val else 1.0
+                    extracted_data = json.loads(response.choices[0].message.content).get('data', [])
+                    
+                    for d in extracted_data:
+                        rate = 1.0
+                        if "GBP" in d['valuta'].upper() or "£" in d['valuta']: rate = rate_gbp
+                        elif "USD" in d['valuta'].upper() or "$" in d['valuta']: rate = rate_usd
                         
-                        p_eur = round(float(i['prezzo']) * r, 2)
-                        p_ref = CATALOGO_PHOTOSI[i['match']]
+                        p_eur = round(float(d['prezzo']) * rate, 2)
                         
-                        all_data.append({
-                            "Paese": row['paese'],
-                            "Competitor": row['competitor'],
-                            "Categoria": i['match'],
-                            "Loro (€)": p_eur,
-                            "PhotoSì (€)": p_ref,
-                            "Delta (€)": round(p_eur - p_ref, 2)
-                        })
-        
-        if all_data:
-            st.table(pd.DataFrame(all_data))
+                        if d['match'] in CATALOGO_PHOTOSI:
+                            p_ref = CATALOGO_PHOTOSI[d['match']]
+                            delta = round(p_eur - p_ref, 2)
+                            
+                            all_results.append({
+                                "Paese": row['paese'],
+                                "Competitor": row['competitor'],
+                                "Categoria": d['match'],
+                                "Prezzo Loro (€)": p_eur,
+                                "PhotoSì (€)": p_ref,
+                                "Delta (€)": delta,
+                                "Status": "🟢 Conveniente" if delta < 0 else "🔴 Più Caro"
+                            })
+                except Exception as e:
+                    st.error(f"Errore AI su {row['competitor']}: {e}")
+            else:
+                st.warning(f"Impossibile leggere il sito {row['competitor']}.")
+    
+    if all_results:
+        st.divider()
+        st.subheader("🏁 Risultati del Confronto")
+        st.dataframe(pd.DataFrame(all_results), use_container_width=True)
